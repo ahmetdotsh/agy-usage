@@ -10,7 +10,15 @@
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const IS_WIN = process.platform === 'win32';
+
+function normalizePathKey(p) {
+  const resolved = resolve(p);
+  return IS_WIN ? resolved.toLowerCase() : resolved;
+}
 
 const HOUR_MS = 3600000;
 const DAY_MS = 86400000;
@@ -798,9 +806,16 @@ function fileUriToResolvedPath(uri) {
   if (!fsPath) return '';
   if (fsPath.startsWith('file://')) {
     try {
-      fsPath = decodeURIComponent(new URL(fsPath).pathname);
+      fsPath = fileURLToPath(fsPath);
     } catch {
-      fsPath = fsPath.slice(7);
+      try {
+        fsPath = decodeURIComponent(new URL(fsPath).pathname);
+      } catch {
+        fsPath = fsPath.slice(7);
+      }
+      if (IS_WIN && /^\/[a-zA-Z]:/.test(fsPath)) {
+        fsPath = fsPath.slice(1);
+      }
     }
   }
   return resolve(fsPath);
@@ -817,7 +832,7 @@ function buildProjectsState(items) {
     if (!entry.name) continue;
     byId.set(entry.id, entry);
     for (const fp of folderPaths) {
-      byPath.set(fp, entry);
+      byPath.set(normalizePathKey(fp), entry);
     }
     clean.push(entry);
   }
@@ -871,7 +886,7 @@ function fallbackProjectsFromDb(geminiDir) {
       if (raw && typeof raw.projects === 'object' && raw.projects !== null) {
         for (const [fsPath, name] of Object.entries(raw.projects)) {
           if (typeof fsPath === 'string' && typeof name === 'string' && name.trim()) {
-            legacyNames.set(resolve(fsPath), name.trim());
+            legacyNames.set(normalizePathKey(fsPath), name.trim());
           }
         }
       }
@@ -896,7 +911,8 @@ function fallbackProjectsFromDb(geminiDir) {
       const entry = found.get(pid) || { id: pid, name: '', folderPaths: [] };
       for (const p of paths) {
         if (!entry.folderPaths.includes(p)) entry.folderPaths.push(p);
-        if (!entry.name && legacyNames.has(p)) entry.name = legacyNames.get(p);
+        const norm = normalizePathKey(p);
+        if (!entry.name && legacyNames.has(norm)) entry.name = legacyNames.get(norm);
       }
       if (!entry.name && paths[0]) entry.name = basename(paths[0]) || paths[0];
       found.set(pid, entry);
@@ -1037,11 +1053,13 @@ function resolveSessionProject(meta, projects) {
     const hit = projects.byId.get(pid);
     if (hit) return { projectKey: hit.id, projectLabel: hit.name };
   }
-  for (const wsPath of meta.workspaceKeys || []) {
+  for (const rawWsPath of meta.workspaceKeys || []) {
+    const wsPath = normalizePathKey(rawWsPath);
     const exact = projects.byPath.get(wsPath);
     if (exact) return { projectKey: exact.id, projectLabel: exact.name };
     for (const [projPath, entry] of projects.byPath) {
-      if (wsPath.startsWith(`${projPath}/`)) {
+      const prefix = projPath.endsWith(sep) ? projPath : `${projPath}${sep}`;
+      if (wsPath.startsWith(prefix)) {
         return { projectKey: entry.id, projectLabel: entry.name };
       }
     }
